@@ -14,6 +14,7 @@ import { DeadlinesPanel } from './DeadlinesPanel';
 import { PriorityBadge } from './PriorityBadge';
 import { ShieldCheck, Zap, Calendar, Check, Clock } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { DayOverview } from './DayOverview';
 
 interface MobileDashboardProps {
   tasks: Task[];
@@ -23,6 +24,7 @@ interface MobileDashboardProps {
 
 export function MobileDashboard({ tasks, meetings, supabaseTasks = [] }: MobileDashboardProps) {
   const [currentTime, setCurrentTime] = useState<Date | null>(null);
+  const [isOverviewMode, setIsOverviewMode] = useState(false);
 
   // Setup tick timer on client side to avoid SSR/hydration mismatch
   useEffect(() => {
@@ -36,6 +38,40 @@ export function MobileDashboard({ tasks, meetings, supabaseTasks = [] }: MobileD
       clearTimeout(timer);
       clearInterval(interval);
     };
+  }, []);
+
+  // Overview Cycle Effect (Every 20 minutes, show for 15 seconds)
+  useEffect(() => {
+    const cycleInterval = setInterval(() => {
+      setIsOverviewMode(true);
+      
+      const timer = setTimeout(() => {
+        setIsOverviewMode(false);
+      }, 15000);
+      
+      return () => clearTimeout(timer);
+    }, 20 * 60 * 1000);
+
+    return () => {
+      clearInterval(cycleInterval);
+    };
+  }, []);
+
+  // Support query param preview: ?overview=1
+  useEffect(() => {
+    if (typeof window !== 'undefined' && window.location.search.includes('overview=1')) {
+      const startTimer = setTimeout(() => {
+        setIsOverviewMode(true);
+      }, 0);
+      const timer = setTimeout(() => {
+        setIsOverviewMode(false);
+        window.history.replaceState({}, document.title, window.location.pathname);
+      }, 15000);
+      return () => {
+        clearTimeout(startTimer);
+        clearTimeout(timer);
+      };
+    }
   }, []);
 
   const parseTimeToSeconds = (timeStr: string | null) => {
@@ -323,6 +359,17 @@ export function MobileDashboard({ tasks, meetings, supabaseTasks = [] }: MobileD
     </section>
   );
 
+  if (isOverviewMode && currentTime) {
+    return (
+      <DayOverview 
+        supabaseTasks={supabaseTasks}
+        progress={progress}
+        currentTime={currentTime}
+        onClose={() => setIsOverviewMode(false)}
+      />
+    );
+  }
+
   return (
     <div className="min-h-screen bg-background text-text-primary pb-20 px-4 sm:px-6 md:px-8 max-w-7xl mx-auto animate-in fade-in duration-300">
       {/* Premium Dashboard Header */}
@@ -457,6 +504,23 @@ export function MobileDashboard({ tasks, meetings, supabaseTasks = [] }: MobileD
 
         </div>
       </main>
+      {/* Dev Mode Preview Trigger */}
+      {process.env.NODE_ENV === 'development' && (
+        <div className="fixed bottom-4 left-4 z-50">
+          <button
+            onClick={() => {
+              setIsOverviewMode(true);
+              const timer = setTimeout(() => {
+                setIsOverviewMode(false);
+              }, 15000);
+              return () => clearTimeout(timer);
+            }}
+            className="px-3 py-1.5 bg-card hover:bg-card-elevated border border-border text-[9px] font-geist font-bold uppercase tracking-wider text-text-secondary hover:text-text-primary rounded-lg transition-colors cursor-pointer shadow-lg shadow-black/40"
+          >
+            Preview Overview (15s)
+          </button>
+        </div>
+      )}
     </div>
   );
 }
