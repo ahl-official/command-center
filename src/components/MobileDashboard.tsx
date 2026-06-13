@@ -1,6 +1,8 @@
 'use client';
 
-import { Task, Meeting } from '@/lib/types';
+import { useState, useEffect } from 'react';
+import { Task, Meeting, Priority } from '@/lib/types';
+import { SupabaseTask } from '@/lib/supabase/types';
 import { AppHeader } from './AppHeader';
 import { RightNowCard } from './RightNowCard';
 import { PriorityList } from './PriorityList';
@@ -9,45 +11,192 @@ import { AlertsPanel } from './AlertsPanel';
 import { PendingApprovalsPanel } from './PendingApprovalsPanel';
 import { DelegatedPanel } from './DelegatedPanel';
 import { DeadlinesPanel } from './DeadlinesPanel';
-import { ShieldCheck, Zap } from 'lucide-react';
+import { PriorityBadge } from './PriorityBadge';
+import { ShieldCheck, Zap, Calendar, Check } from 'lucide-react';
+import { cn } from '@/lib/utils';
 
 interface MobileDashboardProps {
   tasks: Task[];
   meetings: Meeting[];
+  supabaseTasks?: SupabaseTask[];
 }
 
-export function MobileDashboard({ tasks, meetings }: MobileDashboardProps) {
-  const rightNowTask = tasks.find(t => t.isRightNow);
-  
-  // Sort priorities: urgent (4) > high (3) > medium (2) > low (1)
+export function MobileDashboard({ tasks, meetings, supabaseTasks = [] }: MobileDashboardProps) {
+  const [currentTime, setCurrentTime] = useState<Date | null>(null);
+
+  // Setup tick timer on client side to avoid SSR/hydration mismatch
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setCurrentTime(new Date());
+    }, 0);
+    const interval = setInterval(() => {
+      setCurrentTime(new Date());
+    }, 1000);
+    return () => {
+      clearTimeout(timer);
+      clearInterval(interval);
+    };
+  }, []);
+
+  const parseTimeToSeconds = (timeStr: string | null) => {
+    if (!timeStr) return null;
+    const parts = timeStr.split(':');
+    if (parts.length < 2) return null;
+    const hours = parseInt(parts[0], 10);
+    const minutes = parseInt(parts[1], 10);
+    const seconds = parts.length > 2 ? parseInt(parts[2], 10) : 0;
+    return hours * 3600 + minutes * 60 + seconds;
+  };
+
+  // Derive all active state variables if client is mounted and currentTime is set
+  let activeTask: SupabaseTask | null = null;
+  let nextTask: SupabaseTask | null = null;
+  let isDayComplete = false;
+  let countdownText = '';
+  let progress = 0;
+
+  if (currentTime && supabaseTasks.length > 0) {
+    const currentHour = currentTime.getHours();
+    const currentMinute = currentTime.getMinutes();
+    const currentSecond = currentTime.getSeconds();
+    const currentTotalSeconds = currentHour * 3600 + currentMinute * 60 + currentSecond;
+
+    // Determine active task
+    activeTask = supabaseTasks.find(task => {
+      if (!task.start_time) return false;
+      const start = parseTimeToSeconds(task.start_time);
+      if (start === null) return false;
+      const duration = task.end_time ? (parseTimeToSeconds(task.end_time)! - start) : 3600;
+      const end = start + duration;
+      return currentTotalSeconds >= start && currentTotalSeconds < end;
+    }) || null;
+
+    // Determine next upcoming task
+    const futureTasks = supabaseTasks.filter(task => {
+      if (!task.start_time) return false;
+      const start = parseTimeToSeconds(task.start_time);
+      return start !== null && start > currentTotalSeconds;
+    });
+    nextTask = futureTasks[0] || null;
+
+    // Check if day is complete
+    isDayComplete = !activeTask && supabaseTasks.every(task => {
+      if (!task.start_time) return true;
+      const start = parseTimeToSeconds(task.start_time)!;
+      const duration = task.end_time ? (parseTimeToSeconds(task.end_time)! - start) : 3600;
+      const end = start + duration;
+      return currentTotalSeconds >= end;
+    });
+
+    // Compute countdown text
+    if (activeTask && activeTask.start_time) {
+      const start = parseTimeToSeconds(activeTask.start_time)!;
+      const duration = activeTask.end_time ? (parseTimeToSeconds(activeTask.end_time)! - start) : 3600;
+      const end = start + duration;
+      const remainingSeconds = end - currentTotalSeconds;
+
+      if (remainingSeconds > 0) {
+        const remainingMinutes = Math.ceil(remainingSeconds / 60);
+        if (remainingMinutes >= 60) {
+          const hours = Math.floor(remainingMinutes / 60);
+          const minutes = remainingMinutes % 60;
+          countdownText = minutes === 0 
+            ? `${hours} hour${hours > 1 ? 's' : ''} remaining`
+            : `${hours} hour${hours > 1 ? 's' : ''} ${minutes} min${minutes > 1 ? 's' : ''} remaining`;
+        } else {
+          countdownText = `${remainingMinutes} minute${remainingMinutes > 1 ? 's' : ''} remaining`;
+        }
+      } else {
+        countdownText = '0 minutes remaining';
+      }
+    }
+
+    // Compute progress %
+    const completedCount = supabaseTasks.filter(task => {
+      if (task.status === 'done') return true;
+      if (!task.start_time) return false;
+      const start = parseTimeToSeconds(task.start_time);
+      if (start === null) return false;
+      const duration = task.end_time ? (parseTimeToSeconds(task.end_time)! - start) : 3600;
+      const end = start + duration;
+      return currentTotalSeconds >= end;
+    }).length;
+
+    progress = Math.round((completedCount / supabaseTasks.length) * 100);
+  }
+
+  // Helper for timeline display status
+  const getTaskDisplayStatus = (task: SupabaseTask) => {
+    if (!currentTime) return 'future';
+    if (activeTask && activeTask.id === task.id) return 'active';
+    if (task.status === 'done') return 'completed';
+    if (!task.start_time) return 'future';
+
+    const currentTotalSeconds = currentTime.getHours() * 3600 + currentTime.getMinutes() * 60 + currentTime.getSeconds();
+    const start = parseTimeToSeconds(task.start_time)!;
+    const duration = task.end_time ? (parseTimeToSeconds(task.end_time)! - start) : 3600;
+    const end = start + duration;
+
+    if (currentTotalSeconds >= end) return 'completed';
+    return 'future';
+  };
+
   const priorityWeight = { urgent: 4, high: 3, medium: 2, low: 1 };
   const priorityTasks = tasks
     .filter(t => t.category === 'priority' && !t.isRightNow && t.status !== 'done')
     .sort((a, b) => priorityWeight[b.priority] - priorityWeight[a.priority])
     .slice(0, 3);
-  
+
   return (
     <div className="min-h-screen bg-background text-text-primary pb-20 px-4 sm:px-6 md:px-8 max-w-7xl mx-auto">
       {/* Premium Dashboard Header */}
       <AppHeader subtitle="Executive Control Interface" showNavButtons={true} />
 
+      {/* Day Progress Bar */}
+      {currentTime && supabaseTasks.length > 0 && (
+        <div className="glass-panel p-3.5 border border-border bg-card mb-6 rounded-xl">
+          <div className="flex justify-between items-center mb-2">
+            <span className="font-geist text-[10px] font-bold text-text-secondary uppercase tracking-[0.15em]">
+              Daily Schedule Progress
+            </span>
+            <span className="font-geist text-xs font-bold text-accent">
+              {progress}%
+            </span>
+          </div>
+          <div className="w-full bg-background rounded-full h-1.5 overflow-hidden border border-border/50">
+            <div 
+              className="bg-accent h-1.5 rounded-full transition-all duration-500 ease-out" 
+              style={{ width: `${progress}%` }}
+            />
+          </div>
+        </div>
+      )}
+
       {/* Main Single-Column / Desktop-Fluid Flow */}
       <main className="mt-6 space-y-8">
         
-        {/* Section 1: Right Now Active Focus (Full width at top) */}
+        {/* Section 1: Right Now Active Focus / Supabase Current Task */}
         <section className="space-y-3">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 text-text-secondary">
               <Zap size={14} className="text-accent" />
               <h2 className="font-geist text-[10px] font-bold uppercase tracking-[0.2em]">Operational Focus</h2>
             </div>
-            <span className="font-geist text-[9px] font-bold text-success uppercase tracking-widest flex items-center gap-1.5">
-              <span className="w-1.5 h-1.5 bg-success rounded-full animate-pulse" />
-              Active Now
-            </span>
+            {currentTime && activeTask && (
+              <span className="font-geist text-[9px] font-bold text-success uppercase tracking-widest flex items-center gap-1.5">
+                <span className="w-1.5 h-1.5 bg-success rounded-full animate-pulse" />
+                Active Now
+              </span>
+            )}
           </div>
           
-          <RightNowCard task={rightNowTask} />
+          <RightNowCard 
+            task={activeTask} 
+            nextTask={nextTask} 
+            isDayComplete={isDayComplete} 
+            countdownText={countdownText} 
+            supabaseTasksCount={supabaseTasks.length}
+          />
         </section>
 
         {/* Section 2: Critical Metrics & Actions Grid */}
@@ -55,6 +204,92 @@ export function MobileDashboard({ tasks, meetings }: MobileDashboardProps) {
           
           {/* Left / Primary Column (7 cols on Desktop) */}
           <div className="lg:col-span-7 space-y-8">
+            
+            {/* Supabase Schedule Timeline */}
+            {currentTime && supabaseTasks.length > 0 && (
+              <section className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2 text-text-secondary">
+                    <Calendar size={14} className="text-accent" />
+                    <h2 className="font-geist text-[10px] font-bold uppercase tracking-[0.2em]">Operational Timeline</h2>
+                  </div>
+                  <span className="font-geist text-[9px] text-text-muted uppercase tracking-wider">
+                    Today&apos;s Schedule
+                  </span>
+                </div>
+                
+                <div className="space-y-3">
+                  {supabaseTasks.map(task => {
+                    const status = getTaskDisplayStatus(task);
+                    
+                    return (
+                      <div 
+                        key={task.id}
+                        className={cn(
+                          "glass-panel p-4 border rounded-xl flex items-center justify-between gap-4 transition-all",
+                          status === 'active' && "border-accent bg-accent/5 shadow-md shadow-accent/5 ring-1 ring-accent/30",
+                          status === 'completed' && "border-success/30 bg-success/2 opacity-75",
+                          status === 'future' && "border-border/60 hover:border-border"
+                        )}
+                      >
+                        <div className="flex items-center gap-3 min-w-0">
+                          {/* Time block */}
+                          <div className={cn(
+                            "flex-shrink-0 text-center w-16 bg-background/50 border rounded-lg p-1.5 flex flex-col justify-center",
+                            status === 'active' && "border-accent/30",
+                            status === 'completed' && "border-success/20"
+                          )}>
+                            <span className={cn(
+                              "font-geist text-[10px] font-bold block tabular-nums",
+                              status === 'active' && "text-accent",
+                              status === 'completed' && "text-success",
+                              status === 'future' && "text-text-primary"
+                            )}>
+                              {task.start_time || 'ASAP'}
+                            </span>
+                            {task.end_time && (
+                              <span className="text-[8px] font-semibold text-text-muted mt-0.5 border-t border-border/30 pt-0.5 tabular-nums">
+                                {task.end_time}
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="min-w-0">
+                            <h4 className={cn(
+                              "font-geist font-bold text-xs text-text-primary truncate",
+                              status === 'completed' && "text-text-muted line-through"
+                            )}>
+                              {task.title}
+                            </h4>
+                            <div className="flex items-center gap-2 mt-1">
+                              <PriorityBadge priority={task.priority as Priority} />
+                              <span className={cn(
+                                "text-[8px] font-geist font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border",
+                                status === 'active' && "bg-accent/10 text-accent border-accent/20",
+                                status === 'completed' && "bg-success/10 text-success border-success/20",
+                                status === 'future' && "bg-card-elevated text-text-muted border-border/40"
+                              )}>
+                                {status === 'active' ? 'Active Now' : status === 'completed' ? 'Completed' : 'Upcoming'}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {status === 'active' && (
+                          <span className="font-geist text-[10px] font-bold text-accent animate-pulse uppercase tracking-wider flex-shrink-0">
+                            Live
+                          </span>
+                        )}
+                        {status === 'completed' && (
+                          <Check size={14} className="text-success flex-shrink-0" />
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
+            )}
+
             {/* Top Priorities */}
             <section className="space-y-3">
               <div className="flex items-center gap-2 text-text-secondary">

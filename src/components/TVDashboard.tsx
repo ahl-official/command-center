@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { Task, Meeting } from '@/lib/types';
+import { SupabaseTask } from '@/lib/supabase/types';
 import { RightNowCard } from './RightNowCard';
 import { PriorityList } from './PriorityList';
 import { PendingApprovalsPanel } from './PendingApprovalsPanel';
@@ -14,9 +15,10 @@ import Link from 'next/link';
 interface TVDashboardProps {
   tasks: Task[];
   meetings: Meeting[];
+  supabaseTasks?: SupabaseTask[];
 }
 
-export function TVDashboard({ tasks, meetings }: TVDashboardProps) {
+export function TVDashboard({ tasks, meetings, supabaseTasks = [] }: TVDashboardProps) {
   const [time, setTime] = useState<Date | null>(null);
   const [lastUpdated, setLastUpdated] = useState<string>('');
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -30,14 +32,14 @@ export function TVDashboard({ tasks, meetings }: TVDashboardProps) {
     return () => clearInterval(interval);
   }, []);
 
-  // Update last-updated timestamp when tasks/meetings change
+  // Update last-updated timestamp when tasks/meetings/supabaseTasks change
   useEffect(() => {
     const timer = setTimeout(() => {
       const now = new Date();
       setLastUpdated(now.toLocaleTimeString('en-GB', { hour12: false }));
     }, 0);
     return () => clearTimeout(timer);
-  }, [tasks, meetings]);
+  }, [tasks, meetings, supabaseTasks]);
 
   // Monitor fullscreen state
   useEffect(() => {
@@ -73,9 +75,93 @@ export function TVDashboard({ tasks, meetings }: TVDashboardProps) {
     });
   };
 
-  const rightNowTask = tasks.find(t => t.isRightNow);
-  
-  // Sort priorities: urgent (4) > high (3) > medium (2) > low (1)
+  const parseTimeToSeconds = (timeStr: string | null) => {
+    if (!timeStr) return null;
+    const parts = timeStr.split(':');
+    if (parts.length < 2) return null;
+    const hours = parseInt(parts[0], 10);
+    const minutes = parseInt(parts[1], 10);
+    const seconds = parts.length > 2 ? parseInt(parts[2], 10) : 0;
+    return hours * 3600 + minutes * 60 + seconds;
+  };
+
+  // Derive all active state variables if client is mounted and time is set
+  let activeTask: SupabaseTask | null = null;
+  let nextTask: SupabaseTask | null = null;
+  let isDayComplete = false;
+  let countdownText = '';
+  let progress = 0;
+
+  if (time && supabaseTasks.length > 0) {
+    const currentHour = time.getHours();
+    const currentMinute = time.getMinutes();
+    const currentSecond = time.getSeconds();
+    const currentTotalSeconds = currentHour * 3600 + currentMinute * 60 + currentSecond;
+
+    // Determine active task
+    activeTask = supabaseTasks.find(task => {
+      if (!task.start_time) return false;
+      const start = parseTimeToSeconds(task.start_time);
+      if (start === null) return false;
+      const duration = task.end_time ? (parseTimeToSeconds(task.end_time)! - start) : 3600;
+      const end = start + duration;
+      return currentTotalSeconds >= start && currentTotalSeconds < end;
+    }) || null;
+
+    // Determine next upcoming task
+    const futureTasks = supabaseTasks.filter(task => {
+      if (!task.start_time) return false;
+      const start = parseTimeToSeconds(task.start_time);
+      return start !== null && start > currentTotalSeconds;
+    });
+    nextTask = futureTasks[0] || null;
+
+    // Check if day is complete
+    isDayComplete = !activeTask && supabaseTasks.every(task => {
+      if (!task.start_time) return true;
+      const start = parseTimeToSeconds(task.start_time)!;
+      const duration = task.end_time ? (parseTimeToSeconds(task.end_time)! - start) : 3600;
+      const end = start + duration;
+      return currentTotalSeconds >= end;
+    });
+
+    // Compute countdown text
+    if (activeTask && activeTask.start_time) {
+      const start = parseTimeToSeconds(activeTask.start_time)!;
+      const duration = activeTask.end_time ? (parseTimeToSeconds(activeTask.end_time)! - start) : 3600;
+      const end = start + duration;
+      const remainingSeconds = end - currentTotalSeconds;
+
+      if (remainingSeconds > 0) {
+        const remainingMinutes = Math.ceil(remainingSeconds / 60);
+        if (remainingMinutes >= 60) {
+          const hours = Math.floor(remainingMinutes / 60);
+          const minutes = remainingMinutes % 60;
+          countdownText = minutes === 0 
+            ? `${hours} hour${hours > 1 ? 's' : ''} remaining`
+            : `${hours} hour${hours > 1 ? 's' : ''} ${minutes} min${minutes > 1 ? 's' : ''} remaining`;
+        } else {
+          countdownText = `${remainingMinutes} minute${remainingMinutes > 1 ? 's' : ''} remaining`;
+        }
+      } else {
+        countdownText = '0 minutes remaining';
+      }
+    }
+
+    // Compute progress %
+    const completedCount = supabaseTasks.filter(task => {
+      if (task.status === 'done') return true;
+      if (!task.start_time) return false;
+      const start = parseTimeToSeconds(task.start_time);
+      if (start === null) return false;
+      const duration = task.end_time ? (parseTimeToSeconds(task.end_time)! - start) : 3600;
+      const end = start + duration;
+      return currentTotalSeconds >= end;
+    }).length;
+
+    progress = Math.round((completedCount / supabaseTasks.length) * 100);
+  }
+
   const priorityWeight = { urgent: 4, high: 3, medium: 2, low: 1 };
   const priorityTasks = tasks
     .filter(t => t.category === 'priority' && !t.isRightNow && t.status !== 'done')
@@ -117,6 +203,17 @@ export function TVDashboard({ tasks, meetings }: TVDashboardProps) {
         </div>
 
         <div className="flex items-center gap-10 text-right">
+          {time && supabaseTasks.length > 0 && (
+            <div className="flex flex-col items-end border-r border-border pr-8 mr-2 h-12 justify-center">
+              <span className="font-geist text-[10px] font-bold text-text-muted uppercase tracking-[0.2em] mb-0.5">
+                Progress
+              </span>
+              <span className="font-geist text-2xl font-extrabold text-accent tabular-nums">
+                {progress}%
+              </span>
+            </div>
+          )}
+
           <div className="flex flex-col items-end">
             <span className="font-geist text-5xl font-bold text-accent tabular-nums text-glow">
               {formatTime(time)}
@@ -137,7 +234,15 @@ export function TVDashboard({ tasks, meetings }: TVDashboardProps) {
         
         {/* Left Column: Primary Hero (Large Focus Card) */}
         <section className="col-span-8 flex flex-col">
-          <RightNowCard task={rightNowTask} isTV className="flex-grow h-full" />
+          <RightNowCard 
+            task={activeTask} 
+            nextTask={nextTask} 
+            isDayComplete={isDayComplete} 
+            countdownText={countdownText} 
+            supabaseTasksCount={supabaseTasks.length}
+            isTV 
+            className="flex-grow h-full" 
+          />
         </section>
 
         {/* Right Column: Secondary Metrics */}
