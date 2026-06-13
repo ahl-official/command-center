@@ -1,16 +1,16 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Task, Meeting } from '@/lib/types';
+import { Task, Meeting, Priority } from '@/lib/types';
 import { SupabaseTask } from '@/lib/supabase/types';
 import { RightNowCard } from './RightNowCard';
 import { PriorityList } from './PriorityList';
-import { PendingApprovalsPanel } from './PendingApprovalsPanel';
 import { DelegatedPanel } from './DelegatedPanel';
-import { DeadlinesPanel } from './DeadlinesPanel';
 import { AlertsPanel } from './AlertsPanel';
-import { Calendar, Bell, Settings, Maximize, Minimize } from 'lucide-react';
+import { PriorityBadge } from './PriorityBadge';
+import { Calendar, Bell, Settings, Maximize, Minimize, Clock, ShieldCheck, Check } from 'lucide-react';
 import Link from 'next/link';
+import { cn } from '@/lib/utils';
 
 interface TVDashboardProps {
   tasks: Task[];
@@ -91,6 +91,8 @@ export function TVDashboard({ tasks, meetings, supabaseTasks = [] }: TVDashboard
   let isDayComplete = false;
   let countdownText = '';
   let progress = 0;
+  let next3Tasks: SupabaseTask[] = [];
+  let max3PendingTasks: SupabaseTask[] = [];
 
   if (time && supabaseTasks.length > 0) {
     const currentHour = time.getHours();
@@ -108,13 +110,36 @@ export function TVDashboard({ tasks, meetings, supabaseTasks = [] }: TVDashboard
       return currentTotalSeconds >= start && currentTotalSeconds < end;
     }) || null;
 
-    // Determine next upcoming task
+    // Determine all future tasks
     const futureTasks = supabaseTasks.filter(task => {
       if (!task.start_time) return false;
       const start = parseTimeToSeconds(task.start_time);
       return start !== null && start > currentTotalSeconds;
     });
     nextTask = futureTasks[0] || null;
+    next3Tasks = futureTasks.slice(0, 3);
+
+    // Determine pending tasks
+    const pendingTasks = supabaseTasks.filter(task => {
+      if (task.status !== 'pending') return false;
+      if (task.start_time) {
+        const start = parseTimeToSeconds(task.start_time);
+        if (start !== null) {
+          const duration = task.end_time ? (parseTimeToSeconds(task.end_time)! - start) : 3600;
+          const end = start + duration;
+          if (currentTotalSeconds >= end) return false; // past
+        }
+      }
+      return true;
+    });
+
+    // Sort pending tasks by nearest start_time first (nulls last)
+    const sortedPendingTasks = [...pendingTasks].sort((a, b) => {
+      if (!a.start_time) return 1;
+      if (!b.start_time) return -1;
+      return a.start_time.localeCompare(b.start_time);
+    });
+    max3PendingTasks = sortedPendingTasks.slice(0, 3);
 
     // Check if day is complete
     isDayComplete = !activeTask && supabaseTasks.every(task => {
@@ -162,9 +187,26 @@ export function TVDashboard({ tasks, meetings, supabaseTasks = [] }: TVDashboard
     progress = Math.round((completedCount / supabaseTasks.length) * 100);
   }
 
+  // Helper for timeline display status
+  const getTaskDisplayStatus = (task: SupabaseTask) => {
+    if (!time) return 'future';
+    if (activeTask && activeTask.id === task.id) return 'active';
+    if (task.status === 'done') return 'completed';
+    if (!task.start_time) return 'future';
+
+    const currentTotalSeconds = time.getHours() * 3600 + time.getMinutes() * 60 + time.getSeconds();
+    const start = parseTimeToSeconds(task.start_time)!;
+    const duration = task.end_time ? (parseTimeToSeconds(task.end_time)! - start) : 3600;
+    const end = start + duration;
+
+    if (currentTotalSeconds >= end) return 'completed';
+    return 'future';
+  };
+
+  // Local storage priority tasks
   const priorityWeight = { urgent: 4, high: 3, medium: 2, low: 1 };
   const priorityTasks = tasks
-    .filter(t => t.category === 'priority' && !t.isRightNow && t.status !== 'done')
+    .filter(t => t.category === 'priority' && t.status !== 'done')
     .sort((a, b) => priorityWeight[b.priority] - priorityWeight[a.priority])
     .slice(0, 3);
   
@@ -246,9 +288,9 @@ export function TVDashboard({ tasks, meetings, supabaseTasks = [] }: TVDashboard
         </section>
 
         {/* Right Column: Secondary Metrics */}
-        <section className="col-span-4 flex flex-col gap-8">
+        <section className="col-span-4 flex flex-col gap-6 overflow-hidden">
           {/* Next Meeting Card */}
-          <div className="glass-panel p-6 flex flex-col justify-between bg-card border border-border h-36">
+          <div className="glass-panel p-5 flex flex-col justify-between bg-card border border-border h-32 flex-shrink-0">
             <div className="flex justify-between items-center">
               <span className="font-geist text-xs font-bold text-text-muted uppercase tracking-wider">Next Meeting</span>
               <span className="text-accent font-geist text-sm font-bold tabular-nums">
@@ -258,12 +300,12 @@ export function TVDashboard({ tasks, meetings, supabaseTasks = [] }: TVDashboard
             
             {nextMeeting ? (
               <div className="flex items-start gap-4">
-                <div className="bg-card-elevated p-2 rounded-lg border border-border flex items-center justify-center">
-                  <Calendar className="text-accent" size={24} />
+                <div className="bg-card-elevated p-1.5 rounded-lg border border-border flex items-center justify-center">
+                  <Calendar className="text-accent" size={20} />
                 </div>
                 <div className="min-w-0">
-                  <h4 className="font-geist text-base font-bold text-text-primary truncate">{nextMeeting.title}</h4>
-                  <p className="font-inter text-xs text-text-secondary truncate mt-0.5">{nextMeeting.person} • {nextMeeting.mode}</p>
+                  <h4 className="font-geist text-sm font-bold text-text-primary truncate">{nextMeeting.title}</h4>
+                  <p className="font-inter text-[10px] text-text-secondary truncate mt-0.5">{nextMeeting.person} • {nextMeeting.mode}</p>
                 </div>
               </div>
             ) : (
@@ -273,8 +315,34 @@ export function TVDashboard({ tasks, meetings, supabaseTasks = [] }: TVDashboard
             )}
           </div>
 
+          {/* Next Tasks Card (Next 3 tasks only) */}
+          <div className="glass-panel p-5 bg-card border border-border flex flex-col justify-between h-48 flex-shrink-0">
+            <div className="flex justify-between items-center pb-2 border-b border-border/60">
+              <h5 className="font-geist text-xs font-bold text-text-muted uppercase tracking-[0.15em] flex items-center gap-2">
+                <Clock size={12} className="text-accent" />
+                Next Tasks
+              </h5>
+              <span className="font-geist text-[9px] text-text-muted uppercase tracking-wider">Upcoming</span>
+            </div>
+            <div className="flex-grow overflow-y-auto space-y-2 mt-2 pr-1">
+              {next3Tasks.length === 0 ? (
+                <p className="text-text-muted text-xs italic text-center py-4">No upcoming tasks.</p>
+              ) : (
+                next3Tasks.map(task => (
+                  <div key={task.id} className="flex justify-between items-center border-b border-border/30 pb-1.5 last:border-0 last:pb-0">
+                    <span className="font-geist text-xs font-bold text-text-primary truncate max-w-[180px]">{task.title}</span>
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      <PriorityBadge priority={task.priority as Priority} />
+                      <span className="font-geist text-[10px] font-bold text-text-secondary">{task.start_time}</span>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
           {/* Urgent Alerts List */}
-          <div className="flex-grow">
+          <div className="flex-grow overflow-hidden">
             <AlertsPanel tasks={tasks} isTV />
           </div>
         </section>
@@ -282,7 +350,46 @@ export function TVDashboard({ tasks, meetings, supabaseTasks = [] }: TVDashboard
         {/* Bottom Row: Data Grid (4 Columns) */}
         <div className="col-span-12 grid grid-cols-4 gap-8 mt-4">
           
-          {/* Top Priorities */}
+          {/* Col 1: Timeline (Bottom Left) */}
+          <div className="glass-panel p-6 bg-card border border-border flex flex-col justify-between h-[300px]">
+            <div className="flex justify-between items-center mb-4 pb-2 border-b border-border/60">
+              <h5 className="font-geist text-xs font-bold text-text-muted uppercase tracking-[0.15em] flex items-center gap-2">
+                <Calendar size={12} className="text-accent" />
+                Timeline
+              </h5>
+              <span className="font-geist text-[9px] text-text-muted uppercase tracking-wider">Today</span>
+            </div>
+            <div className="flex-grow overflow-y-auto space-y-2 pr-1">
+              {supabaseTasks.map(task => {
+                const status = getTaskDisplayStatus(task);
+                return (
+                  <div 
+                    key={task.id} 
+                    className={cn(
+                      "flex justify-between items-center border border-border/40 p-2 rounded-lg",
+                      status === 'active' && "border-accent bg-accent/5",
+                      status === 'completed' && "border-success/20 bg-success/2 opacity-75"
+                    )}
+                  >
+                    <div className="min-w-0">
+                      <p className={cn("font-geist text-[11px] font-bold truncate", status === 'completed' && "line-through text-text-muted")}>
+                        {task.title}
+                      </p>
+                      <span className="text-[8px] text-text-muted font-bold block mt-0.5">{task.start_time} - {task.end_time || 'ASAP'}</span>
+                    </div>
+                    {status === 'active' && (
+                      <span className="w-1.5 h-1.5 bg-accent rounded-full animate-pulse flex-shrink-0" />
+                    )}
+                    {status === 'completed' && (
+                      <Check size={10} className="text-success flex-shrink-0" />
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Col 2: Top Priorities */}
           <div className="glass-panel p-6 bg-card border border-border flex flex-col justify-between h-[300px]">
             <div className="flex justify-between items-center mb-4 pb-2 border-b border-border/60">
               <h5 className="font-geist text-xs font-bold text-text-muted uppercase tracking-[0.15em]">Top Priorities</h5>
@@ -293,19 +400,41 @@ export function TVDashboard({ tasks, meetings, supabaseTasks = [] }: TVDashboard
             </div>
           </div>
 
-          {/* Pending Approvals */}
-          <div className="h-[300px] overflow-hidden">
-            <PendingApprovalsPanel tasks={tasks} isTV />
+          {/* Col 3: Delegated Tasks */}
+          <div className="glass-panel p-6 bg-card border border-border flex flex-col justify-between h-[300px]">
+            <div className="flex justify-between items-center mb-4 pb-2 border-b border-border/60">
+              <h5 className="font-geist text-xs font-bold text-text-muted uppercase tracking-[0.15em]">Delegated Tasks</h5>
+              <span className="material-symbols-outlined text-text-muted text-lg" data-icon="account_balance">account_balance</span>
+            </div>
+            <div className="flex-grow overflow-hidden">
+              <DelegatedPanel tasks={tasks} isTV />
+            </div>
           </div>
 
-          {/* Delegated Tasks */}
-          <div className="h-[300px] overflow-hidden">
-            <DelegatedPanel tasks={tasks} isTV />
-          </div>
-
-          {/* Approaching Deadlines */}
-          <div className="h-[300px] overflow-hidden">
-            <DeadlinesPanel tasks={tasks} isTV />
+          {/* Col 4: Pending Tasks (Bottom Right) */}
+          <div className="glass-panel p-6 bg-card border border-border flex flex-col justify-between h-[300px]">
+            <div className="flex justify-between items-center mb-4 pb-2 border-b border-border/60">
+              <h5 className="font-geist text-xs font-bold text-text-muted uppercase tracking-[0.15em] flex items-center gap-2">
+                <ShieldCheck size={12} className="text-accent" />
+                Pending Tasks
+              </h5>
+              <span className="font-geist text-[9px] text-text-muted uppercase tracking-wider">Remaining</span>
+            </div>
+            <div className="flex-grow overflow-y-auto space-y-2 pr-1">
+              {max3PendingTasks.length === 0 ? (
+                <p className="text-text-muted text-xs italic text-center py-8">No pending tasks.</p>
+              ) : (
+                max3PendingTasks.map(task => (
+                  <div key={task.id} className="flex justify-between items-center border border-border/40 p-2 rounded-lg">
+                    <div className="min-w-0">
+                      <p className="font-geist text-[11px] font-bold truncate">{task.title}</p>
+                      <span className="text-[8px] text-text-muted font-bold block mt-0.5">{task.start_time || 'ASAP'}</span>
+                    </div>
+                    <PriorityBadge priority={task.priority as Priority} />
+                  </div>
+                ))
+              )}
+            </div>
           </div>
 
         </div>

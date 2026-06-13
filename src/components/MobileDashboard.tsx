@@ -12,7 +12,7 @@ import { PendingApprovalsPanel } from './PendingApprovalsPanel';
 import { DelegatedPanel } from './DelegatedPanel';
 import { DeadlinesPanel } from './DeadlinesPanel';
 import { PriorityBadge } from './PriorityBadge';
-import { ShieldCheck, Zap, Calendar, Check } from 'lucide-react';
+import { ShieldCheck, Zap, Calendar, Check, Clock } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface MobileDashboardProps {
@@ -54,6 +54,8 @@ export function MobileDashboard({ tasks, meetings, supabaseTasks = [] }: MobileD
   let isDayComplete = false;
   let countdownText = '';
   let progress = 0;
+  let next3Tasks: SupabaseTask[] = [];
+  let max3PendingTasks: SupabaseTask[] = [];
 
   if (currentTime && supabaseTasks.length > 0) {
     const currentHour = currentTime.getHours();
@@ -71,13 +73,36 @@ export function MobileDashboard({ tasks, meetings, supabaseTasks = [] }: MobileD
       return currentTotalSeconds >= start && currentTotalSeconds < end;
     }) || null;
 
-    // Determine next upcoming task
+    // Determine all future tasks
     const futureTasks = supabaseTasks.filter(task => {
       if (!task.start_time) return false;
       const start = parseTimeToSeconds(task.start_time);
       return start !== null && start > currentTotalSeconds;
     });
     nextTask = futureTasks[0] || null;
+    next3Tasks = futureTasks.slice(0, 3);
+
+    // Determine pending tasks
+    const pendingTasks = supabaseTasks.filter(task => {
+      if (task.status !== 'pending') return false;
+      if (task.start_time) {
+        const start = parseTimeToSeconds(task.start_time);
+        if (start !== null) {
+          const duration = task.end_time ? (parseTimeToSeconds(task.end_time)! - start) : 3600;
+          const end = start + duration;
+          if (currentTotalSeconds >= end) return false; // past
+        }
+      }
+      return true;
+    });
+
+    // Sort pending tasks by nearest start_time first (nulls last)
+    const sortedPendingTasks = [...pendingTasks].sort((a, b) => {
+      if (!a.start_time) return 1;
+      if (!b.start_time) return -1;
+      return a.start_time.localeCompare(b.start_time);
+    });
+    max3PendingTasks = sortedPendingTasks.slice(0, 3);
 
     // Check if day is complete
     isDayComplete = !activeTask && supabaseTasks.every(task => {
@@ -141,14 +166,165 @@ export function MobileDashboard({ tasks, meetings, supabaseTasks = [] }: MobileD
     return 'future';
   };
 
+  // Local storage priority tasks
   const priorityWeight = { urgent: 4, high: 3, medium: 2, low: 1 };
   const priorityTasks = tasks
-    .filter(t => t.category === 'priority' && !t.isRightNow && t.status !== 'done')
+    .filter(t => t.category === 'priority' && t.status !== 'done')
     .sort((a, b) => priorityWeight[b.priority] - priorityWeight[a.priority])
     .slice(0, 3);
 
+  // Reusable Timeline Render function
+  const renderTimeline = () => (
+    <section className="space-y-3">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2 text-text-secondary">
+          <Calendar size={14} className="text-accent" />
+          <h2 className="font-geist text-[10px] font-bold uppercase tracking-[0.2em]">Operational Timeline</h2>
+        </div>
+        <span className="font-geist text-[9px] text-text-muted uppercase tracking-wider">
+          Today&apos;s Schedule
+        </span>
+      </div>
+      
+      <div className="space-y-3">
+        {supabaseTasks.map(task => {
+          const status = getTaskDisplayStatus(task);
+          
+          return (
+            <div 
+              key={task.id}
+              className={cn(
+                "glass-panel p-4 border rounded-xl flex items-center justify-between gap-4 transition-all",
+                status === 'active' && "border-accent bg-accent/5 shadow-md shadow-accent/5 ring-1 ring-accent/30",
+                status === 'completed' && "border-success/30 bg-success/2 opacity-75",
+                status === 'future' && "border-border/60 hover:border-border"
+              )}
+            >
+              <div className="flex items-center gap-3 min-w-0">
+                <div className={cn(
+                  "flex-shrink-0 text-center w-16 bg-background/50 border rounded-lg p-1.5 flex flex-col justify-center",
+                  status === 'active' && "border-accent/30",
+                  status === 'completed' && "border-success/20"
+                )}>
+                  <span className={cn(
+                    "font-geist text-[10px] font-bold block tabular-nums",
+                    status === 'active' && "text-accent",
+                    status === 'completed' && "text-success",
+                    status === 'future' && "text-text-primary"
+                  )}>
+                    {task.start_time || 'ASAP'}
+                  </span>
+                  {task.end_time && (
+                    <span className="text-[8px] font-semibold text-text-muted mt-0.5 border-t border-border/30 pt-0.5 tabular-nums">
+                      {task.end_time}
+                    </span>
+                  )}
+                </div>
+
+                <div className="min-w-0">
+                  <h4 className={cn(
+                    "font-geist font-bold text-xs text-text-primary truncate",
+                    status === 'completed' && "text-text-muted line-through"
+                  )}>
+                    {task.title}
+                  </h4>
+                  <div className="flex items-center gap-2 mt-1">
+                    <PriorityBadge priority={task.priority as Priority} />
+                    <span className={cn(
+                      "text-[8px] font-geist font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border",
+                      status === 'active' && "bg-accent/10 text-accent border-accent/20",
+                      status === 'completed' && "bg-success/10 text-success border-success/20",
+                      status === 'future' && "bg-card-elevated text-text-muted border-border/40"
+                    )}>
+                      {status === 'active' ? 'Active Now' : status === 'completed' ? 'Completed' : 'Upcoming'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {status === 'active' && (
+                <span className="font-geist text-[10px] font-bold text-accent animate-pulse uppercase tracking-wider flex-shrink-0">
+                  Live
+                </span>
+              )}
+              {status === 'completed' && (
+                <Check size={14} className="text-success flex-shrink-0" />
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+
+  // Reusable Next Tasks Render function
+  const renderNextTasks = () => (
+    <section className="space-y-3">
+      <div className="flex items-center gap-2 text-text-secondary">
+        <Clock size={14} className="text-accent" />
+        <h2 className="font-geist text-[10px] font-bold uppercase tracking-[0.2em]">Next Tasks</h2>
+      </div>
+      <div className="space-y-3">
+        {next3Tasks.length === 0 ? (
+          <div className="glass-panel p-6 text-center border border-dashed border-border bg-card/50 text-text-muted text-xs italic rounded-xl">
+            No upcoming tasks.
+          </div>
+        ) : (
+          next3Tasks.map(task => (
+            <div key={task.id} className="glass-panel p-4 border border-border bg-card flex items-center justify-between gap-4 rounded-xl">
+              <div className="min-w-0">
+                <h4 className="font-geist font-bold text-xs text-text-primary truncate">
+                  {task.title}
+                </h4>
+                <div className="flex items-center gap-2 mt-1">
+                  <PriorityBadge priority={task.priority as Priority} />
+                  <span className="text-[9px] font-geist font-bold text-text-muted">
+                    {task.start_time} - {task.end_time || 'ASAP'}
+                  </span>
+                </div>
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+    </section>
+  );
+
+  // Reusable Pending Tasks Render function
+  const renderPendingTasks = () => (
+    <section className="space-y-3">
+      <div className="flex items-center gap-2 text-text-secondary">
+        <ShieldCheck size={14} className="text-accent" />
+        <h2 className="font-geist text-[10px] font-bold uppercase tracking-[0.2em]">Pending Tasks</h2>
+      </div>
+      <div className="space-y-3">
+        {max3PendingTasks.length === 0 ? (
+          <div className="glass-panel p-6 text-center border border-dashed border-border bg-card/50 text-text-muted text-xs italic rounded-xl">
+            No pending tasks.
+          </div>
+        ) : (
+          max3PendingTasks.map(task => (
+            <div key={task.id} className="glass-panel p-4 border border-border bg-card flex items-center justify-between gap-4 rounded-xl">
+              <div className="min-w-0">
+                <h4 className="font-geist font-bold text-xs text-text-primary truncate">
+                  {task.title}
+                </h4>
+                <div className="flex items-center gap-2 mt-1">
+                  <PriorityBadge priority={task.priority as Priority} />
+                  <span className="text-[9px] font-geist font-bold text-text-muted">
+                    {task.start_time || 'ASAP'}
+                  </span>
+                </div>
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+    </section>
+  );
+
   return (
-    <div className="min-h-screen bg-background text-text-primary pb-20 px-4 sm:px-6 md:px-8 max-w-7xl mx-auto">
+    <div className="min-h-screen bg-background text-text-primary pb-20 px-4 sm:px-6 md:px-8 max-w-7xl mx-auto animate-in fade-in duration-300">
       {/* Premium Dashboard Header */}
       <AppHeader subtitle="Executive Control Interface" showNavButtons={true} />
 
@@ -199,96 +375,41 @@ export function MobileDashboard({ tasks, meetings, supabaseTasks = [] }: MobileD
           />
         </section>
 
-        {/* Section 2: Critical Metrics & Actions Grid */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+        {/* MOBILE LAYOUT ONLY (lg:hidden) */}
+        {currentTime && supabaseTasks.length > 0 && (
+          <div className="flex flex-col space-y-8 lg:hidden">
+            {/* 2. Next Tasks */}
+            {renderNextTasks()}
+
+            {/* 3. Timeline */}
+            {renderTimeline()}
+
+            {/* 4. Pending Tasks */}
+            {renderPendingTasks()}
+
+            {/* Other Mobile Panels */}
+            <section className="space-y-3">
+              <div className="flex items-center gap-2 text-text-secondary">
+                <ShieldCheck size={14} className="text-accent" />
+                <h2 className="font-geist text-[10px] font-bold uppercase tracking-[0.2em]">Top Priorities</h2>
+              </div>
+              <PriorityList tasks={priorityTasks} />
+            </section>
+            <PendingApprovalsPanel tasks={tasks} />
+            <DeadlinesPanel tasks={tasks} />
+            <AlertsPanel tasks={tasks} />
+            <MeetingsPanel meetings={meetings} />
+            <DelegatedPanel tasks={tasks} />
+          </div>
+        )}
+
+        {/* DESKTOP LAYOUT ONLY (hidden lg:grid) */}
+        <div className="hidden lg:grid grid-cols-12 gap-8 items-start">
           
           {/* Left / Primary Column (7 cols on Desktop) */}
           <div className="lg:col-span-7 space-y-8">
-            
-            {/* Supabase Schedule Timeline */}
-            {currentTime && supabaseTasks.length > 0 && (
-              <section className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2 text-text-secondary">
-                    <Calendar size={14} className="text-accent" />
-                    <h2 className="font-geist text-[10px] font-bold uppercase tracking-[0.2em]">Operational Timeline</h2>
-                  </div>
-                  <span className="font-geist text-[9px] text-text-muted uppercase tracking-wider">
-                    Today&apos;s Schedule
-                  </span>
-                </div>
-                
-                <div className="space-y-3">
-                  {supabaseTasks.map(task => {
-                    const status = getTaskDisplayStatus(task);
-                    
-                    return (
-                      <div 
-                        key={task.id}
-                        className={cn(
-                          "glass-panel p-4 border rounded-xl flex items-center justify-between gap-4 transition-all",
-                          status === 'active' && "border-accent bg-accent/5 shadow-md shadow-accent/5 ring-1 ring-accent/30",
-                          status === 'completed' && "border-success/30 bg-success/2 opacity-75",
-                          status === 'future' && "border-border/60 hover:border-border"
-                        )}
-                      >
-                        <div className="flex items-center gap-3 min-w-0">
-                          {/* Time block */}
-                          <div className={cn(
-                            "flex-shrink-0 text-center w-16 bg-background/50 border rounded-lg p-1.5 flex flex-col justify-center",
-                            status === 'active' && "border-accent/30",
-                            status === 'completed' && "border-success/20"
-                          )}>
-                            <span className={cn(
-                              "font-geist text-[10px] font-bold block tabular-nums",
-                              status === 'active' && "text-accent",
-                              status === 'completed' && "text-success",
-                              status === 'future' && "text-text-primary"
-                            )}>
-                              {task.start_time || 'ASAP'}
-                            </span>
-                            {task.end_time && (
-                              <span className="text-[8px] font-semibold text-text-muted mt-0.5 border-t border-border/30 pt-0.5 tabular-nums">
-                                {task.end_time}
-                              </span>
-                            )}
-                          </div>
-
-                          <div className="min-w-0">
-                            <h4 className={cn(
-                              "font-geist font-bold text-xs text-text-primary truncate",
-                              status === 'completed' && "text-text-muted line-through"
-                            )}>
-                              {task.title}
-                            </h4>
-                            <div className="flex items-center gap-2 mt-1">
-                              <PriorityBadge priority={task.priority as Priority} />
-                              <span className={cn(
-                                "text-[8px] font-geist font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border",
-                                status === 'active' && "bg-accent/10 text-accent border-accent/20",
-                                status === 'completed' && "bg-success/10 text-success border-success/20",
-                                status === 'future' && "bg-card-elevated text-text-muted border-border/40"
-                              )}>
-                                {status === 'active' ? 'Active Now' : status === 'completed' ? 'Completed' : 'Upcoming'}
-                              </span>
-                            </div>
-                          </div>
-                        </div>
-
-                        {status === 'active' && (
-                          <span className="font-geist text-[10px] font-bold text-accent animate-pulse uppercase tracking-wider flex-shrink-0">
-                            Live
-                          </span>
-                        )}
-                        {status === 'completed' && (
-                          <Check size={14} className="text-success flex-shrink-0" />
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              </section>
-            )}
+            {/* 3. Timeline (Bottom Left) */}
+            {currentTime && supabaseTasks.length > 0 && renderTimeline()}
 
             {/* Top Priorities */}
             <section className="space-y-3">
@@ -312,6 +433,12 @@ export function MobileDashboard({ tasks, meetings, supabaseTasks = [] }: MobileD
 
           {/* Right / Ancillary Column (5 cols on Desktop) */}
           <div className="lg:col-span-5 space-y-8">
+            {/* 2. Next Tasks (Right side) */}
+            {currentTime && supabaseTasks.length > 0 && renderNextTasks()}
+
+            {/* 4. Pending Tasks (Bottom Right) */}
+            {currentTime && supabaseTasks.length > 0 && renderPendingTasks()}
+
             {/* Urgent Alerts */}
             <section>
               <AlertsPanel tasks={tasks} />
